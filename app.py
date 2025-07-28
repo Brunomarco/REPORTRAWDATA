@@ -7,6 +7,13 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
+# Check if required libraries are installed
+try:
+    import plotly
+except ImportError:
+    st.error("Please install plotly: pip install plotly")
+    st.stop()
+
 # Configure Streamlit page
 st.set_page_config(
 page_title="LFS Amsterdam - TMS Performance Dashboard",
@@ -171,8 +178,12 @@ def load_tms_data(uploaded_file):
                     'Net_Revenue', 'Currency', 'Diff', 'Gross_Percent', 'Invoice_Num',
                     'Total_Amount', 'Status', 'PU_Country']
     
-    new_cols = expected_cols[:len(cost_df.columns)]
-    cost_df.columns = new_cols
+    # Only rename columns if they exist
+    if len(cost_df.columns) >= len(expected_cols):
+     cost_df.columns = expected_cols
+    else:
+     new_cols = expected_cols[:len(cost_df.columns)]
+     cost_df.columns = new_cols
     
     if 'Order_Date' in cost_df.columns:
      cost_df['Order_Date'] = safe_date_conversion(cost_df['Order_Date'])
