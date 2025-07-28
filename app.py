@@ -16,11 +16,15 @@ except ImportError:
 
 # Configure Streamlit page
 st.set_page_config(
-page_title="LFS Amsterdam - TMS Performance Dashboard",
-page_icon="📊",
-layout="wide",
-initial_sidebar_state="expanded"
+    page_title="LFS Amsterdam - TMS Performance Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# Add session state initialization
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
 
 # Custom CSS - minimal styling
 st.markdown("""
@@ -66,6 +70,13 @@ text-align: center;
 # Title
 st.markdown('<h1 class="main-header">LFS Amsterdam TMS Performance Dashboard</h1>', unsafe_allow_html=True)
 
+# Debug info (remove after testing)
+with st.expander("Debug Information"):
+    st.write("Python version:", pd.__version__)
+    st.write("Pandas version:", pd.__version__)
+    st.write("Plotly version:", px.__version__)
+    st.write("Streamlit version:", st.__version__)
+
 # Sidebar
 st.sidebar.title("📊 Dashboard Controls")
 st.sidebar.markdown("---")
@@ -106,7 +117,15 @@ def load_tms_data(uploaded_file):
  """Load and process TMS Excel file"""
  if uploaded_file is not None:
   try:
-   excel_sheets = pd.read_excel(uploaded_file, sheet_name=None)
+   # Try to read Excel file with different engines
+   try:
+    excel_sheets = pd.read_excel(uploaded_file, sheet_name=None, engine='openpyxl')
+   except:
+    try:
+     excel_sheets = pd.read_excel(uploaded_file, sheet_name=None, engine='xlrd')
+    except:
+     excel_sheets = pd.read_excel(uploaded_file, sheet_name=None)
+   
    data = {}
    
    # 1. Raw Data
