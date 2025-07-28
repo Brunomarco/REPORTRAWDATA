@@ -73,17 +73,6 @@ help="Upload your 'report raw data.xls' file"
 SERVICE_TYPES = ['CTX', 'CX', 'EF', 'EGD', 'FF', 'RGD', 'ROU', 'SF']
 COUNTRIES = ['AT', 'AU', 'BE', 'DE', 'DK', 'ES', 'FR', 'GB', 'IT', 'N1', 'NL', 'NZ', 'SE', 'US']
 
-# Complete QC Name mapping
-QC_CATEGORIES = {
-'MNX-Incorrect QDT': 'System Error',
-'Customer-Changed delivery parameters': 'Customer Related',
-'Consignee-Driver waiting at delivery': 'Delivery Issue',
-'Customer-Requested delay': 'Customer Related',
-'Customer-Shipment not ready': 'Customer Related',
-'Del Agt-Late del': 'Delivery Issue',
-'Consignee-Changed delivery parameters': 'Delivery Issue'
-}
-
 def safe_date_conversion(date_series):
  """Safely convert Excel dates"""
  try:
@@ -94,11 +83,27 @@ def safe_date_conversion(date_series):
  except:
   return date_series
 
+def safe_float_conversion(value):
+ """Safely convert value to float"""
+ try:
+  if pd.isna(value):
+   return 0.0
+  if isinstance(value, (int, float)):
+   return float(value)
+  if isinstance(value, str):
+   # Remove currency symbols and spaces
+   value = value.replace('€', '').replace('$', '').replace(',', '').strip()
+   return float(value) if value else 0.0
+  return 0.0
+ except:
+  return 0.0
+
 @st.cache_data
 def load_tms_data(uploaded_file):
  """Load and process TMS Excel file"""
  if uploaded_file is not None:
   try:
+   # Read all sheets
    excel_sheets = pd.read_excel(uploaded_file, sheet_name=None)
    data = {}
    
@@ -106,157 +111,154 @@ def load_tms_data(uploaded_file):
    if "AMS RAW DATA" in excel_sheets:
     data['raw_data'] = excel_sheets["AMS RAW DATA"].copy()
    
-   # 2. OTP Data with QC Name processing
+   # 2. OTP Data
    if "OTP POD" in excel_sheets:
     otp_df = excel_sheets["OTP POD"].copy()
-    # Get first 6 columns to include QC Name
     if len(otp_df.columns) >= 6:
      otp_df = otp_df.iloc[:, :6]
      otp_df.columns = ['TMS_Order', 'QDT', 'POD_DateTime', 'Time_Diff', 'Status', 'QC_Name']
     else:
-     # Handle case with fewer columns
      cols = ['TMS_Order', 'QDT', 'POD_DateTime', 'Time_Diff', 'Status'][:len(otp_df.columns)]
      otp_df.columns = cols
     otp_df = otp_df.dropna(subset=['TMS_Order'])
     data['otp'] = otp_df
    
-   # 3. Volume Data - Process dynamically from Excel
+   # 3. Volume Data - Based on the screenshot structure
    if "Volume per SVC" in excel_sheets:
     volume_df = excel_sheets["Volume per SVC"].copy()
     
-    # Try to read the actual matrix from Excel
-    if not volume_df.empty:
-     # Assuming first column is countries and rest are services
-     volume_df = volume_df.set_index(volume_df.columns[0])
+    # Initialize dictionaries
+    service_country_matrix = {}
+    service_volumes = {svc: 0 for svc in SERVICE_TYPES}
+    country_volumes = {country: 0 for country in COUNTRIES}
+    
+    # Process the volume matrix
+    # Assuming the first row contains service types and first column contains countries
+    for idx, row in volume_df.iterrows():
+     if idx == 0:  # Skip header row if needed
+      continue
      
-     # Initialize dictionaries
-     service_country_matrix = {}
-     service_volumes = {}
-     country_volumes = {}
-     
-     # Process the matrix
-     for country in volume_df.index:
-      if pd.notna(country) and country in COUNTRIES:
-       service_country_matrix[country] = {}
-       country_total = 0
-       
-       for service in volume_df.columns:
-        if service in SERVICE_TYPES:
-         value = volume_df.loc[country, service]
-         if pd.notna(value) and value > 0:
-          service_country_matrix[country][service] = int(value)
-          country_total += int(value)
-          
-          # Update service totals
-          if service not in service_volumes:
-           service_volumes[service] = 0
-          service_volumes[service] += int(value)
-       
-       if country_total > 0:
-        country_volumes[country] = country_total
-     
-     # Calculate total volume
-     total_vol = sum(service_volumes.values())
-     
-     data['service_volumes'] = service_volumes
-     data['country_volumes'] = country_volumes
-     data['service_country_matrix'] = service_country_matrix
-     data['total_volume'] = total_vol
+     country = str(row.iloc[0]) if not pd.isna(row.iloc[0]) else None
+     if country and country in COUNTRIES:
+      service_country_matrix[country] = {}
+      
+      for col_idx, service in enumerate(volume_df.columns[1:], 1):
+       if service in SERVICE_TYPES:
+        value = safe_float_conversion(row.iloc[col_idx])
+        if value > 0:
+         service_country_matrix[country][service] = int(value)
+         service_volumes[service] += int(value)
+         country_volumes[country] += int(value)
+    
+    # Remove services/countries with zero volume
+    service_volumes = {k: v for k, v in service_volumes.items() if v > 0}
+    country_volumes = {k: v for k, v in country_volumes.items() if v > 0}
+    
+    # Calculate total
+    total_vol = sum(service_volumes.values())
+    
+    data['service_volumes'] = service_volumes
+    data['country_volumes'] = country_volumes
+    data['service_country_matrix'] = service_country_matrix
+    data['total_volume'] = total_vol
    
-   # 4. Lane Usage - Process dynamically from Excel
+   # 4. Lane Usage
    if "Lane usage " in excel_sheets:
     lane_df = excel_sheets["Lane usage "].copy()
     
-    if not lane_df.empty:
-     # Process lane matrix dynamically
-     lane_df = lane_df.set_index(lane_df.columns[0])
-     
-     lanes_list = []
-     origin_totals = {}
-     dest_totals = {}
-     
-     for origin in lane_df.index:
-      if pd.notna(origin):
-       origin_total = 0
-       for dest in lane_df.columns:
-        if pd.notna(dest):
-         value = lane_df.loc[origin, dest]
-         if pd.notna(value) and value > 0:
+    lanes_list = []
+    origin_totals = {}
+    dest_totals = {}
+    
+    # Process lane matrix - first column is origins, first row is destinations
+    for idx, row in lane_df.iterrows():
+     if idx == 0:  # Skip if header row
+      continue
+      
+     origin = str(row.iloc[0]) if not pd.isna(row.iloc[0]) else None
+     if origin:
+      for col_idx, col_name in enumerate(lane_df.columns[1:], 1):
+       dest = str(col_name) if not pd.isna(col_name) else None
+       if dest:
+        try:
+         value = safe_float_conversion(row.iloc[col_idx])
+         if value > 0:
           lanes_list.append({
-           'Origin': str(origin),
-           'Destination': str(dest),
+           'Origin': origin,
+           'Destination': dest,
            'Volume': int(value)
           })
-          origin_total += int(value)
           
-          # Update destination totals
-          if dest not in dest_totals:
-           dest_totals[dest] = 0
-          dest_totals[dest] += int(value)
-       
-       if origin_total > 0:
-        origin_totals[str(origin)] = origin_total
-     
-     data['lanes_list'] = lanes_list
-     data['origin_totals'] = origin_totals
-     data['dest_totals'] = dest_totals
+          # Update totals
+          origin_totals[origin] = origin_totals.get(origin, 0) + int(value)
+          dest_totals[dest] = dest_totals.get(dest, 0) + int(value)
+        except:
+         continue
     
+    data['lanes_list'] = lanes_list
+    data['origin_totals'] = origin_totals
+    data['dest_totals'] = dest_totals
     data['lanes'] = lane_df
    
-   # 5. Cost Sales - Fixed to properly process financial data
+   # 5. Cost Sales
    if "cost sales" in excel_sheets:
     cost_df = excel_sheets["cost sales"].copy()
     
-    # Dynamically map columns based on content
-    if not cost_df.empty:
-     # Try to identify columns by their content patterns
-     for i, col in enumerate(cost_df.columns):
-      sample_values = cost_df[col].dropna().head(10)
-      
-      # Date column
-      if any(isinstance(v, (pd.Timestamp, datetime)) for v in sample_values):
-       cost_df.rename(columns={col: 'Order_Date'}, inplace=True)
-      # Revenue column (look for positive monetary values)
-      elif 'revenue' in str(col).lower() or 'sales' in str(col).lower():
-       cost_df.rename(columns={col: 'Net_Revenue'}, inplace=True)
-      # Cost columns
-      elif 'pu' in str(col).lower() and 'cost' in str(col).lower():
-       cost_df.rename(columns={col: 'PU_Cost'}, inplace=True)
-      elif 'ship' in str(col).lower() and 'cost' in str(col).lower():
-       cost_df.rename(columns={col: 'Ship_Cost'}, inplace=True)
-      elif 'man' in str(col).lower() and 'cost' in str(col).lower():
-       cost_df.rename(columns={col: 'Man_Cost'}, inplace=True)
-      elif 'del' in str(col).lower() and 'cost' in str(col).lower():
-       cost_df.rename(columns={col: 'Del_Cost'}, inplace=True)
-      elif 'total' in str(col).lower() and 'cost' in str(col).lower():
-       cost_df.rename(columns={col: 'Total_Cost'}, inplace=True)
-      # Gross percent
-      elif 'gross' in str(col).lower() and '%' in str(col).lower():
-       cost_df.rename(columns={col: 'Gross_Percent'}, inplace=True)
-      # Country column
-      elif 'country' in str(col).lower() or (len(sample_values) > 0 and all(len(str(v)) == 2 for v in sample_values if pd.notna(v))):
-       cost_df.rename(columns={col: 'PU_Country'}, inplace=True)
+    # Clean column names
+    cost_df.columns = [str(col).strip() for col in cost_df.columns]
+    
+    # Try to identify columns by patterns
+    for col in cost_df.columns:
+     col_lower = col.lower()
      
-     # Convert date columns
-     if 'Order_Date' in cost_df.columns:
-      cost_df['Order_Date'] = safe_date_conversion(cost_df['Order_Date'])
-     
-     # Clean financial data - remove rows with missing financial values
-     financial_cols = ['Net_Revenue', 'Total_Cost']
-     existing_fin_cols = [col for col in financial_cols if col in cost_df.columns]
-     
-     if existing_fin_cols:
-      cost_df = cost_df.dropna(subset=existing_fin_cols)
-      # Only keep rows with actual financial activity
-      if 'Net_Revenue' in cost_df.columns and 'Total_Cost' in cost_df.columns:
-       cost_df = cost_df[(cost_df['Net_Revenue'] != 0) | (cost_df['Total_Cost'] != 0)]
-     
-     data['cost_sales'] = cost_df
+     # Revenue columns
+     if any(term in col_lower for term in ['revenue', 'net revenue', 'sales']):
+      cost_df.rename(columns={col: 'Net_Revenue'}, inplace=True)
+     # Total cost
+     elif 'total' in col_lower and 'cost' in col_lower:
+      cost_df.rename(columns={col: 'Total_Cost'}, inplace=True)
+     # Individual costs
+     elif 'pu' in col_lower and 'cost' in col_lower:
+      cost_df.rename(columns={col: 'PU_Cost'}, inplace=True)
+     elif 'ship' in col_lower and 'cost' in col_lower:
+      cost_df.rename(columns={col: 'Ship_Cost'}, inplace=True)
+     elif 'man' in col_lower and 'cost' in col_lower:
+      cost_df.rename(columns={col: 'Man_Cost'}, inplace=True)
+     elif 'del' in col_lower and 'cost' in col_lower:
+      cost_df.rename(columns={col: 'Del_Cost'}, inplace=True)
+     # Gross percent
+     elif 'gross' in col_lower and ('%' in col_lower or 'percent' in col_lower):
+      cost_df.rename(columns={col: 'Gross_Percent'}, inplace=True)
+     # Country
+     elif 'country' in col_lower:
+      cost_df.rename(columns={col: 'PU_Country'}, inplace=True)
+     # Date
+     elif 'date' in col_lower:
+      cost_df.rename(columns={col: 'Order_Date'}, inplace=True)
+    
+    # Convert numeric columns
+    numeric_cols = ['Net_Revenue', 'Total_Cost', 'PU_Cost', 'Ship_Cost', 'Man_Cost', 'Del_Cost', 'Gross_Percent']
+    for col in numeric_cols:
+     if col in cost_df.columns:
+      cost_df[col] = cost_df[col].apply(safe_float_conversion)
+    
+    # Convert date
+    if 'Order_Date' in cost_df.columns:
+     cost_df['Order_Date'] = safe_date_conversion(cost_df['Order_Date'])
+    
+    # Clean data - only keep rows with financial activity
+    if 'Net_Revenue' in cost_df.columns and 'Total_Cost' in cost_df.columns:
+     cost_df = cost_df[(cost_df['Net_Revenue'] != 0) | (cost_df['Total_Cost'] != 0)]
+     cost_df = cost_df.dropna(subset=['Net_Revenue', 'Total_Cost'])
+    
+    data['cost_sales'] = cost_df
    
    return data
    
   except Exception as e:
    st.error(f"Error processing Excel file: {str(e)}")
+   import traceback
+   st.error(traceback.format_exc())
    return None
  return None
 
@@ -271,7 +273,7 @@ if uploaded_file is not None:
 else:
  st.sidebar.info("📁 Upload Excel file to begin")
 
-# Calculate global metrics for use across tabs
+# Calculate global metrics
 avg_otp = 0
 total_orders = 0
 total_revenue = 0
@@ -281,7 +283,7 @@ total_services = 0
 
 if tms_data is not None:
  # Calculate key metrics
- total_services = tms_data.get('total_volume', sum(tms_data.get('service_volumes', {}).values()))
+ total_services = tms_data.get('total_volume', 0)
  
  # OTP metrics
  if 'otp' in tms_data and not tms_data['otp'].empty:
@@ -292,7 +294,7 @@ if tms_data is not None:
    on_time_orders = len(status_series[status_series == 'ON TIME'])
    avg_otp = (on_time_orders / total_orders * 100) if total_orders > 0 else 0
  
- # Financial metrics - Fixed to only use rows with actual financial data
+ # Financial metrics
  if 'cost_sales' in tms_data and not tms_data['cost_sales'].empty:
   cost_df = tms_data['cost_sales']
   if 'Net_Revenue' in cost_df.columns:
@@ -301,7 +303,7 @@ if tms_data is not None:
    total_cost = cost_df['Total_Cost'].sum()
   profit_margin = ((total_revenue - total_cost) / total_revenue * 100) if total_revenue > 0 else 0
 
-# Create tabs for each sheet
+# Create tabs
 if tms_data is not None:
  tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
   "📊 Overview", 
@@ -340,12 +342,12 @@ if tms_data is not None:
    st.markdown(f"""
    **Volume Analysis:**
    - The **{total_services} shipments** represent all packages handled by LFS Amsterdam
-   - With **{len(tms_data.get('country_volumes', {}))} active countries**, we process diverse international operations
-   - Netherlands handles the largest volume, confirming Amsterdam as the main hub
+   - Active in **{len(tms_data.get('country_volumes', {}))} countries**
+   - Operating **{len(tms_data.get('service_volumes', {}))} service types**
    
    **Service Distribution:**
-   - **{len([s for s in tms_data.get('service_volumes', {}).values() if s > 0])} active service types** provide flexibility for different customer needs
-   - Service mix shows balanced operations between speed and cost-efficiency
+   - Multiple service types provide flexibility for customer needs
+   - Mix shows balance between express and standard services
    """)
    st.markdown('</div>', unsafe_allow_html=True)
   
@@ -355,28 +357,28 @@ if tms_data is not None:
    
    if avg_otp >= 95:
     st.markdown(f"""
-    ✅ **OTP at {avg_otp:.1f}%** means we deliver on-time {int(avg_otp/100 * total_orders)} out of {total_orders} orders
-    - This exceeds industry standard (95%), showing reliable service
-    - Customers can trust our delivery promises
+    ✅ **OTP at {avg_otp:.1f}%** - Exceeding target
+    - Delivering {int(avg_otp/100 * total_orders)} out of {total_orders} orders on time
+    - Industry-leading performance
     """)
    else:
     st.markdown(f"""
-    ⚠️ **OTP at {avg_otp:.1f}%** means we're late on {total_orders - int(avg_otp/100 * total_orders)} out of {total_orders} orders
-    - We need {int((95-avg_otp)/100 * total_orders)} more on-time deliveries to hit target
-    - Each 1% improvement = {total_orders/100:.0f} more satisfied customers
+    ⚠️ **OTP at {avg_otp:.1f}%** - Below 95% target
+    - Need {int((95-avg_otp)/100 * total_orders)} more on-time deliveries
+    - Focus on improvement initiatives
     """)
    
    if profit_margin >= 20:
     st.markdown(f"""
-    ✅ **{profit_margin:.1f}% margin** means €{profit_margin:.0f} profit per €100 revenue
-    - Healthy profitability above 20% target
-    - Strong financial position for growth investments
+    ✅ **{profit_margin:.1f}% margin** - Healthy profitability
+    - Above 20% target threshold
+    - Strong financial position
     """)
    else:
     st.markdown(f"""
-    ⚠️ **{profit_margin:.1f}% margin** needs improvement
-    - Currently €{profit_margin:.0f} profit per €100 revenue
-    - Need to increase by €{20-profit_margin:.0f} per €100 to hit target
+    ⚠️ **{profit_margin:.1f}% margin** - Below target
+    - Need {20-profit_margin:.1f}% improvement
+    - Review pricing and costs
     """)
    st.markdown('</div>', unsafe_allow_html=True)
  
@@ -388,79 +390,61 @@ if tms_data is not None:
    col1, col2 = st.columns(2)
    
    with col1:
-    st.markdown('<p class="chart-title">Service Type Distribution - What We Ship</p>', unsafe_allow_html=True)
+    st.markdown('<p class="chart-title">Service Type Distribution</p>', unsafe_allow_html=True)
     
     service_data = pd.DataFrame(list(tms_data['service_volumes'].items()), 
                               columns=['Service', 'Volume'])
-    service_data = service_data[service_data['Volume'] > 0]
+    service_data = service_data[service_data['Volume'] > 0].sort_values('Volume', ascending=False)
     
-    # Use darker colors
     fig = px.bar(service_data, x='Service', y='Volume', 
                 color='Volume', 
-                color_continuous_scale=[[0, '#08519c'], [0.5, '#3182bd'], [1, '#6baed6']],
+                color_continuous_scale='Blues',
                 title='')
     fig.update_layout(showlegend=False, height=400)
     st.plotly_chart(fig, use_container_width=True)
     
-    # Service breakdown with interpretation
+    # Service table
     service_table = service_data.copy()
     service_table['Share %'] = (service_table['Volume'] / service_table['Volume'].sum() * 100).round(1)
-    service_table['Interpretation'] = service_table.apply(
-     lambda x: f"{'Leading' if x['Share %'] > 20 else 'Secondary' if x['Share %'] > 10 else 'Niche'} service",
-     axis=1
-    )
-    service_table = service_table.sort_values('Volume', ascending=False)
     st.dataframe(service_table, hide_index=True, use_container_width=True)
    
    with col2:
-    st.markdown('<p class="chart-title">Country Distribution - Where We Operate</p>', unsafe_allow_html=True)
+    st.markdown('<p class="chart-title">Country Distribution</p>', unsafe_allow_html=True)
     
     if 'country_volumes' in tms_data and tms_data['country_volumes']:
      country_data = pd.DataFrame(list(tms_data['country_volumes'].items()), 
                                columns=['Country', 'Volume'])
+     country_data = country_data.sort_values('Volume', ascending=False)
      
-     # Use darker green colors
      fig = px.bar(country_data, x='Country', y='Volume',
                  color='Volume', 
-                 color_continuous_scale=[[0, '#006d2c'], [0.5, '#31a354'], [1, '#74c476']],
+                 color_continuous_scale='Greens',
                  title='')
      fig.update_layout(showlegend=False, height=400)
      st.plotly_chart(fig, use_container_width=True)
      
-     # Country breakdown with regions
+     # Country table
      country_table = country_data.copy()
      country_table['Share %'] = (country_table['Volume'] / country_table['Volume'].sum() * 100).round(1)
-     country_table['Region'] = country_table['Country'].apply(
-      lambda x: 'Europe' if x in ['AT', 'BE', 'DE', 'DK', 'ES', 'FR', 'GB', 'IT', 'NL', 'SE'] 
-      else 'Americas' if x in ['US'] 
-      else 'Asia-Pacific' if x in ['AU', 'NZ'] 
-      else 'Other'
-     )
-     country_table = country_table.sort_values('Volume', ascending=False)
      st.dataframe(country_table, hide_index=True, use_container_width=True)
   
-  # Service-Country Matrix Heatmap
-  if 'service_country_matrix' in tms_data:
-   st.markdown('<p class="chart-title">Service-Country Matrix - What Services Go Where</p>', unsafe_allow_html=True)
+  # Service-Country Matrix
+  if 'service_country_matrix' in tms_data and tms_data['service_country_matrix']:
+   st.markdown('<p class="chart-title">Service-Country Matrix</p>', unsafe_allow_html=True)
    
-   # Create matrix dataframe
+   # Create matrix
+   countries = sorted(tms_data['service_country_matrix'].keys())
+   services = sorted(set(s for c in tms_data['service_country_matrix'].values() for s in c.keys()))
+   
    matrix_data = []
-   all_countries = sorted(tms_data['service_country_matrix'].keys())
-   all_services = sorted(set(service for country_data in tms_data['service_country_matrix'].values() for service in country_data.keys()))
-   
-   for country in all_countries:
+   for country in countries:
     row = {'Country': country}
-    for service in all_services:
-     if country in tms_data['service_country_matrix'] and service in tms_data['service_country_matrix'][country]:
-      row[service] = tms_data['service_country_matrix'][country][service]
-     else:
-      row[service] = 0
+    for service in services:
+     row[service] = tms_data['service_country_matrix'].get(country, {}).get(service, 0)
     matrix_data.append(row)
    
-   matrix_df = pd.DataFrame(matrix_data)
-   matrix_df = matrix_df.set_index('Country')
+   matrix_df = pd.DataFrame(matrix_data).set_index('Country')
    
-   # Create heatmap
    fig = px.imshow(matrix_df.T, 
                   labels=dict(x="Country", y="Service Type", color="Volume"),
                   title="",
@@ -468,33 +452,6 @@ if tms_data is not None:
                   aspect='auto')
    fig.update_layout(height=500)
    st.plotly_chart(fig, use_container_width=True)
-  
-  # Detailed Analysis with meaning
-  st.markdown('<div class="insight-box">', unsafe_allow_html=True)
-  st.markdown("### 📦 Understanding the Volume Patterns")
-  
-  # Display top services dynamically
-  if 'service_volumes' in tms_data:
-   top_services = sorted([(k, v) for k, v in tms_data['service_volumes'].items() if v > 0], 
-                        key=lambda x: x[1], reverse=True)[:3]
-   
-   st.markdown(f"""
-   **What the Service Distribution Tells Us:**
-   - **{top_services[0][0] if top_services else 'Top'} Service ({top_services[0][1] if top_services else 0} shipments)**: Leading service type
-   - **{top_services[1][0] if len(top_services) > 1 else 'Second'} Service ({top_services[1][1] if len(top_services) > 1 else 0} shipments)**: Secondary volume driver
-   - Service mix shows operational focus areas
-   
-   **Geographic Insights:**
-   - Netherlands processes the highest volume as the central hub
-   - European markets dominate the operation
-   - Clear opportunities in underserved markets
-   
-   **Business Implications:**
-   - Hub-and-spoke model is working with Amsterdam central
-   - Service concentration suggests operational efficiency focus
-   - Geographic spread provides risk diversification
-   """)
-  st.markdown('</div>', unsafe_allow_html=True)
  
  # TAB 3: OTP Performance
  with tab3:
@@ -503,11 +460,10 @@ if tms_data is not None:
   if 'otp' in tms_data and not tms_data['otp'].empty:
    otp_df = tms_data['otp']
    
-   # OTP Status Analysis
    col1, col2 = st.columns(2)
    
    with col1:
-    st.markdown('<p class="chart-title">Delivery Performance Breakdown</p>', unsafe_allow_html=True)
+    st.markdown('<p class="chart-title">Delivery Performance</p>', unsafe_allow_html=True)
     
     if 'Status' in otp_df.columns:
      status_counts = otp_df['Status'].value_counts()
@@ -518,106 +474,54 @@ if tms_data is not None:
      fig.update_traces(textposition='inside', textinfo='percent+label')
      st.plotly_chart(fig, use_container_width=True)
     
-    # Performance Metrics with explanations
+    # Metrics table
     on_time_count = int(avg_otp/100 * total_orders)
     late_count = total_orders - on_time_count
     
     metrics_data = pd.DataFrame({
      'Metric': ['Total Orders', 'On-Time', 'Late', 'OTP Rate'],
-     'Value': [
-      f"{total_orders:,}",
-      f"{on_time_count:,}",
-      f"{late_count:,}",
-      f"{avg_otp:.1f}%"
-     ],
-     'Target': [
-      '-',
-      '-',
-      '-',
-      '95%'
-     ]
+     'Value': [f"{total_orders:,}", f"{on_time_count:,}", f"{late_count:,}", f"{avg_otp:.1f}%"],
+     'Target': ['-', '-', '-', '95%']
     })
     st.dataframe(metrics_data, hide_index=True, use_container_width=True)
    
    with col2:
-    st.markdown('<p class="chart-title">Root Causes of Delays</p>', unsafe_allow_html=True)
+    st.markdown('<p class="chart-title">Delay Causes</p>', unsafe_allow_html=True)
     
     if 'QC_Name' in otp_df.columns:
-     # Process all QC reasons
-     qc_data = []
-     for idx, value in otp_df['QC_Name'].dropna().items():
-      reasons = str(value).strip()
-      if reasons and reasons != 'nan':
-       qc_data.append(reasons)
+     # Process QC reasons
+     delay_categories = {'Customer Issues': 0, 'System Errors': 0, 'Delivery Problems': 0}
      
-     # Count occurrences
-     qc_counts = {}
-     for reasons in qc_data:
-      # Common delay reasons from the data
-      delay_reasons = [
-       'MNX-Incorrect QDT',
-       'Customer-Changed delivery parameters',
-       'Consignee-Driver waiting at delivery',
-       'Customer-Requested delay',
-       'Customer-Shipment not ready',
-       'Del Agt-Late del',
-       'Consignee-Changed delivery parameters'
-      ]
-      
-      for reason in delay_reasons:
-       if reason in reasons:
-        if reason not in qc_counts:
-         qc_counts[reason] = 0
-        qc_counts[reason] += 1
+     for value in otp_df['QC_Name'].dropna():
+      reason = str(value).strip()
+      if 'Customer' in reason:
+       delay_categories['Customer Issues'] += 1
+      elif 'MNX' in reason:
+       delay_categories['System Errors'] += 1
+      elif reason and reason != 'nan':
+       delay_categories['Delivery Problems'] += 1
      
-     if qc_counts:
-      # Categorize for visualization
-      category_summary = {
-       'Customer Issues': 0,
-       'System Errors': 0,
-       'Delivery Problems': 0
-      }
-      
-      for reason, count in qc_counts.items():
-       if 'Customer' in reason:
-        category_summary['Customer Issues'] += count
-       elif 'MNX' in reason:
-        category_summary['System Errors'] += count
-       else:
-        category_summary['Delivery Problems'] += count
-      
-      fig = px.bar(x=list(category_summary.keys()), y=list(category_summary.values()),
+     if sum(delay_categories.values()) > 0:
+      fig = px.bar(x=list(delay_categories.keys()), y=list(delay_categories.values()),
                   title='',
-                  color=list(category_summary.values()),
+                  color=list(delay_categories.values()),
                   color_continuous_scale='Reds')
       fig.update_layout(showlegend=False, xaxis_title='Category', yaxis_title='Count')
       st.plotly_chart(fig, use_container_width=True)
-      
-      # Show detailed reasons
-      st.markdown("**Detailed Delay Reasons:**")
-      qc_detail_df = pd.DataFrame(list(qc_counts.items()), columns=['Reason', 'Count'])
-      qc_detail_df = qc_detail_df.sort_values('Count', ascending=False)
-      st.dataframe(qc_detail_df, hide_index=True, use_container_width=True)
   
-  # OTP Summary Insights
+  # OTP Summary
   st.markdown('<div class="insight-box">', unsafe_allow_html=True)
   st.markdown("### ⏱️ OTP Performance Summary")
   st.markdown(f"""
-  **Key Findings:**
-  - Current OTP: {avg_otp:.1f}% {'(Above target)' if avg_otp >= 95 else '(Below target)'}
-  - Total orders tracked: {total_orders:,}
-  - On-time deliveries: {int(avg_otp/100 * total_orders):,}
-  - Late deliveries: {total_orders - int(avg_otp/100 * total_orders):,}
+  **Performance Metrics:**
+  - OTP Rate: {avg_otp:.1f}% {'✅ Above' if avg_otp >= 95 else '⚠️ Below'} 95% target
+  - On-time deliveries: {int(avg_otp/100 * total_orders):,} orders
+  - Late deliveries: {total_orders - int(avg_otp/100 * total_orders):,} orders
   
-  **Main Delay Causes:**
-  - Customer-related issues (parameter changes, not ready)
-  - System errors (incorrect delivery time calculations)
-  - Delivery execution challenges
-  
-  **Improvement Opportunities:**
-  - Better customer communication to reduce last-minute changes
-  - System fixes for accurate delivery time calculations
-  - Operational improvements in last-mile delivery
+  **Improvement Focus:**
+  - Address customer-related delays
+  - Fix system calculation errors
+  - Optimize delivery operations
   """)
   st.markdown('</div>', unsafe_allow_html=True)
  
@@ -628,15 +532,11 @@ if tms_data is not None:
   if 'cost_sales' in tms_data and not tms_data['cost_sales'].empty:
    cost_df = tms_data['cost_sales']
    
-   # Financial Overview
-   st.markdown('<p class="chart-title">Overall Financial Health</p>', unsafe_allow_html=True)
-   
-   # First row - Revenue/Cost/Profit and Cost Breakdown
+   # First row - Revenue/Cost and Cost Breakdown
    col1, col2 = st.columns(2)
    
    with col1:
     st.markdown("**Revenue vs Cost Analysis**")
-    st.markdown("<small>Shows total income, expenses, and resulting profit</small>", unsafe_allow_html=True)
     
     profit = total_revenue - total_cost
     financial_data = pd.DataFrame({
@@ -646,59 +546,46 @@ if tms_data is not None:
     
     fig = px.bar(financial_data, x='Category', y='Amount',
                 color='Category',
-                color_discrete_map={'Revenue': '#2ca02c', 
-                                  'Cost': '#ff7f0e',
+                color_discrete_map={'Revenue': '#2ca02c', 'Cost': '#ff7f0e',
                                   'Profit': '#2ca02c' if profit >= 0 else '#d62728'},
                 title='')
     fig.update_layout(showlegend=False, height=350)
     st.plotly_chart(fig, use_container_width=True)
     
-    # Financial summary
     st.write(f"**Total Revenue**: €{total_revenue:,.0f}")
     st.write(f"**Total Cost**: €{total_cost:,.0f}")
     st.write(f"**Net Profit**: €{profit:,.0f}")
-    st.write(f"**Overall Margin**: {profit_margin:.1f}%")
    
    with col2:
     st.markdown("**Cost Structure Breakdown**")
-    st.markdown("<small>Understanding where money is spent</small>", unsafe_allow_html=True)
     
     cost_components = {}
-    cost_cols = ['PU_Cost', 'Ship_Cost', 'Man_Cost', 'Del_Cost']
-    for col in cost_cols:
+    for col in ['PU_Cost', 'Ship_Cost', 'Man_Cost', 'Del_Cost']:
      if col in cost_df.columns:
       cost_sum = cost_df[col].sum()
       if cost_sum > 0:
        cost_components[col.replace('_Cost', '')] = cost_sum
     
     if cost_components:
-     # Add percentages to labels
      total_costs = sum(cost_components.values())
-     labels = [f"{k}<br>{v/total_costs*100:.1f}%" for k, v in cost_components.items()]
      
      fig = px.pie(values=list(cost_components.values()), 
-                names=labels,
+                names=list(cost_components.keys()),
                 title='')
-     fig.update_traces(textposition='inside', textinfo='value+label')
-     fig.update_layout(height=350, showlegend=False)
+     fig.update_traces(textposition='inside', textinfo='percent+label')
+     fig.update_layout(height=350)
      st.plotly_chart(fig, use_container_width=True)
-    
-    # Cost insights
-    if cost_components:
-     largest_cost = max(cost_components, key=cost_components.get)
-     st.write(f"**Biggest expense**: {largest_cost} ({cost_components[largest_cost]/total_costs*100:.1f}%)")
-     st.write(f"**Total costs**: €{total_costs:,.0f}")
    
-   # Second row - Profit Margin Distribution (separate plot as requested)
+   # Profit Margin Distribution
    st.markdown('<p class="chart-title">Profit Margin Analysis</p>', unsafe_allow_html=True)
    
    if 'Gross_Percent' in cost_df.columns:
-    # Create a dedicated section for margin distribution
     col1, col2 = st.columns(2)
     
     with col1:
-     st.markdown("**Margin Distribution by Order**")
+     st.markdown("**Margin Distribution**")
      margin_data = cost_df['Gross_Percent'].dropna()
+     
      if not margin_data.empty:
       # Convert to percentage if needed
       if margin_data.max() <= 1:
@@ -706,279 +593,183 @@ if tms_data is not None:
       
       fig = px.histogram(margin_data, nbins=30,
                        title='',
-                       labels={'value': 'Margin %', 'count': 'Number of Orders'})
+                       labels={'value': 'Margin %', 'count': 'Orders'})
       fig.add_vline(x=20, line_dash="dash", line_color="green", 
                   annotation_text="Target 20%")
       fig.add_vline(x=0, line_dash="dash", line_color="red", 
                   annotation_text="Break-even")
       fig.update_traces(marker_color='lightcoral')
-      fig.update_layout(height=400)
       st.plotly_chart(fig, use_container_width=True)
     
     with col2:
      st.markdown("**Margin Statistics**")
      
-     # Calculate detailed margin statistics
-     profitable_orders = len(margin_data[margin_data > 0])
-     loss_making_orders = len(margin_data[margin_data < 0])
-     high_margin_orders = len(margin_data[margin_data >= 20])
-     
-     margin_stats = pd.DataFrame({
-      'Category': [
-       'Total Orders Analyzed',
-       'Profitable Orders',
-       'Loss-making Orders',
-       'High Margin (≥20%)',
-       'Average Margin',
-       'Median Margin'
-      ],
-      'Value': [
-       f"{len(margin_data):,}",
-       f"{profitable_orders:,} ({profitable_orders/len(margin_data)*100:.1f}%)",
-       f"{loss_making_orders:,} ({loss_making_orders/len(margin_data)*100:.1f}%)",
-       f"{high_margin_orders:,} ({high_margin_orders/len(margin_data)*100:.1f}%)",
-       f"{margin_data.mean():.1f}%",
-       f"{margin_data.median():.1f}%"
-      ]
-     })
-     st.dataframe(margin_stats, hide_index=True, use_container_width=True)
+     if not margin_data.empty:
+      profitable = len(margin_data[margin_data > 0])
+      high_margin = len(margin_data[margin_data >= 20])
+      
+      stats = pd.DataFrame({
+       'Metric': ['Total Orders', 'Profitable', 'Loss-making', 'High Margin (≥20%)', 
+                  'Avg Margin', 'Median Margin'],
+       'Value': [
+        f"{len(margin_data):,}",
+        f"{profitable:,} ({profitable/len(margin_data)*100:.1f}%)",
+        f"{len(margin_data) - profitable:,}",
+        f"{high_margin:,} ({high_margin/len(margin_data)*100:.1f}%)",
+        f"{margin_data.mean():.1f}%",
+        f"{margin_data.median():.1f}%"
+       ]
+      })
+      st.dataframe(stats, hide_index=True, use_container_width=True)
    
-   # Country Financial Performance - FIXED to only show countries with financial data
+   # Country Performance
    if 'PU_Country' in cost_df.columns:
-    st.markdown('<p class="chart-title">Country-by-Country Financial Performance</p>', unsafe_allow_html=True)
+    st.markdown('<p class="chart-title">Country Financial Performance</p>', unsafe_allow_html=True)
     
-    # Only aggregate countries that have financial data
-    country_financials = cost_df.groupby('PU_Country').agg({
+    country_fin = cost_df.groupby('PU_Country').agg({
      'Net_Revenue': 'sum',
-     'Total_Cost': 'sum',
-     'Gross_Percent': 'mean'
+     'Total_Cost': 'sum'
     }).round(2)
     
-    country_financials['Profit'] = country_financials['Net_Revenue'] - country_financials['Total_Cost']
-    country_financials['Margin_Percent'] = (country_financials['Gross_Percent'] * 100).round(1)
+    country_fin['Profit'] = country_fin['Net_Revenue'] - country_fin['Total_Cost']
+    country_fin['Margin %'] = ((country_fin['Profit'] / country_fin['Net_Revenue']) * 100).round(1)
+    country_fin = country_fin.sort_values('Net_Revenue', ascending=False)
     
-    # Sort by revenue
-    country_financials = country_financials.sort_values('Net_Revenue', ascending=False)
-    
-    # Create subplots with better spacing
-    col1, col2 = st.columns([1, 1])
+    col1, col2 = st.columns(2)
     
     with col1:
      st.markdown("**Revenue by Country**")
-     st.markdown("<small>Which markets generate most income?</small>", unsafe_allow_html=True)
+     revenue_data = country_fin[country_fin['Net_Revenue'] > 0]
      
-     revenue_data = country_financials.reset_index()
-     revenue_data = revenue_data[revenue_data['Net_Revenue'] > 0]
-     
-     fig = px.bar(revenue_data, x='PU_Country', y='Net_Revenue',
-                title='',
-                color='Net_Revenue',
-                color_continuous_scale=[[0, '#006d2c'], [0.5, '#31a354'], [1, '#74c476']])
+     fig = px.bar(revenue_data.reset_index(), x='PU_Country', y='Net_Revenue',
+                title='', color='Net_Revenue',
+                color_continuous_scale='Greens')
      fig.update_layout(showlegend=False, height=400)
      st.plotly_chart(fig, use_container_width=True)
     
     with col2:
      st.markdown("**Profit/Loss by Country**")
-     st.markdown("<small>Which routes are actually profitable?</small>", unsafe_allow_html=True)
-     
-     profit_data = country_financials[['Profit']].reset_index()
+     profit_data = country_fin.reset_index()
      profit_data['Color'] = profit_data['Profit'].apply(lambda x: 'Profit' if x >= 0 else 'Loss')
      
      fig = px.bar(profit_data, x='PU_Country', y='Profit',
-                title='',
-                color='Color',
+                title='', color='Color',
                 color_discrete_map={'Profit': '#2ca02c', 'Loss': '#d62728'})
      fig.update_layout(showlegend=False, height=400)
      st.plotly_chart(fig, use_container_width=True)
     
-    # Detailed financial table with insights - only show countries with data
-    st.markdown("**Detailed Country Financial Performance**")
-    
-    display_financials = country_financials.copy()
-    display_financials['Revenue'] = display_financials['Net_Revenue'].round(0).astype(int)
-    display_financials['Cost'] = display_financials['Total_Cost'].round(0).astype(int)
-    display_financials['Profit'] = display_financials['Profit'].round(0).astype(int)
-    display_financials['Status'] = display_financials['Profit'].apply(
+    # Country table
+    st.markdown("**Detailed Country Performance**")
+    display_fin = country_fin.copy()
+    display_fin['Status'] = display_fin['Profit'].apply(
      lambda x: '🟢 Profitable' if x > 0 else '🔴 Loss-making'
     )
-    display_financials = display_financials[['Revenue', 'Cost', 'Profit', 'Margin_Percent', 'Status']]
-    display_financials.columns = ['Revenue (€)', 'Cost (€)', 'Profit (€)', 'Margin (%)', 'Status']
-    
-    st.dataframe(display_financials, use_container_width=True)
-    
-    # Add summary statistics
-    st.markdown("**Financial Summary by Country:**")
-    profitable_countries = len(display_financials[display_financials['Profit (€)'] > 0])
-    total_countries = len(display_financials)
-    st.write(f"- **Profitable countries**: {profitable_countries} out of {total_countries}")
-    st.write(f"- **Average country margin**: {display_financials['Margin (%)'].mean():.1f}%")
-    st.write(f"- **Best performing**: {display_financials.index[0]} with {display_financials.iloc[0]['Margin (%)']}% margin")
-  
-  # Financial Insights with business meaning
-  st.markdown('<div class="insight-box">', unsafe_allow_html=True)
-  st.markdown("### 💰 Financial Performance Summary")
-  st.markdown(f"""
-  **Overall Financial Health:**
-  - **Total Revenue**: €{total_revenue:,.0f}
-  - **Total Costs**: €{total_cost:,.0f}
-  - **Net Profit**: €{total_revenue - total_cost:,.0f}
-  - **Overall Margin**: {profit_margin:.1f}% {'(Above target)' if profit_margin >= 20 else '(Below 20% target)'}
-  - **Per shipment**: €{total_revenue/total_services:.2f} revenue, €{total_cost/total_services:.2f} cost
-  
-  **Cost Structure Insights:**
-  - Identify largest cost drivers for optimization
-  - Balance between pickup, shipping, handling, and delivery costs
-  - Focus efficiency improvements on highest cost areas
-  
-  **Margin Distribution Analysis:**
-  - Shows profitability variation across orders
-  - Identifies pricing opportunities and problem areas
-  - Target: Increase orders above 20% margin threshold
-  
-  **Country Performance:**
-  - Not all high-revenue countries are profitable
-  - Some smaller markets show better margins
-  - Consider volume vs. profitability trade-offs
-  """)
-  st.markdown('</div>', unsafe_allow_html=True)
+    display_fin = display_fin[['Net_Revenue', 'Total_Cost', 'Profit', 'Margin %', 'Status']]
+    display_fin.columns = ['Revenue (€)', 'Cost (€)', 'Profit (€)', 'Margin (%)', 'Status']
+    display_fin = display_fin.round(0)
+    st.dataframe(display_fin, use_container_width=True)
  
  # TAB 5: Lane Network
  with tab5:
   st.markdown('<h2 class="section-header">Lane Network & Route Analysis</h2>', unsafe_allow_html=True)
   
   if 'lanes_list' in tms_data and tms_data['lanes_list']:
-   st.markdown('<p class="chart-title">Trade Lane Network Visualization</p>', unsafe_allow_html=True)
-   
+   # Origin and Destination summaries
    col1, col2 = st.columns(2)
    
    with col1:
     st.markdown("**Top Origin Countries**")
-    st.markdown("<small>Countries sending most shipments</small>", unsafe_allow_html=True)
-    
-    if 'origin_totals' in tms_data:
+    if 'origin_totals' in tms_data and tms_data['origin_totals']:
      origin_data = pd.DataFrame(list(tms_data['origin_totals'].items()), 
                               columns=['Origin', 'Volume'])
      origin_data = origin_data.sort_values('Volume', ascending=False).head(10)
      
      fig = px.bar(origin_data, x='Origin', y='Volume',
-                title='',
-                color='Volume',
+                title='', color='Volume',
                 color_continuous_scale='Blues')
      fig.update_layout(showlegend=False, height=350)
      st.plotly_chart(fig, use_container_width=True)
    
    with col2:
     st.markdown("**Top Destination Countries**")
-    st.markdown("<small>Countries receiving most shipments</small>", unsafe_allow_html=True)
-    
-    if 'dest_totals' in tms_data:
+    if 'dest_totals' in tms_data and tms_data['dest_totals']:
      dest_data = pd.DataFrame(list(tms_data['dest_totals'].items()), 
                             columns=['Destination', 'Volume'])
      dest_data = dest_data.sort_values('Volume', ascending=False).head(10)
      
      fig = px.bar(dest_data, x='Destination', y='Volume',
-                title='',
-                color='Volume',
+                title='', color='Volume',
                 color_continuous_scale='Greens')
      fig.update_layout(showlegend=False, height=350)
      st.plotly_chart(fig, use_container_width=True)
    
-   # Complete Lane Matrix - USING ACTUAL DATA FROM EXCEL
+   # Lane Matrix
    st.markdown('<p class="chart-title">Complete Lane Network Matrix</p>', unsafe_allow_html=True)
    
-   # Create matrix from actual lane data
-   all_lanes = tms_data['lanes_list']
+   # Create matrix from lane data
+   lanes_df = pd.DataFrame(tms_data['lanes_list'])
    
    # Get unique origins and destinations
-   origins = sorted(set(lane['Origin'] for lane in all_lanes))
-   destinations = sorted(set(lane['Destination'] for lane in all_lanes))
+   origins = sorted(lanes_df['Origin'].unique())
+   destinations = sorted(lanes_df['Destination'].unique())
    
-   # Create empty matrix
-   matrix = pd.DataFrame(0, index=origins, columns=destinations)
-   
-   # Fill matrix with actual volumes
-   for lane in all_lanes:
-    matrix.loc[lane['Origin'], lane['Destination']] = lane['Volume']
+   # Create pivot table for matrix
+   matrix = lanes_df.pivot_table(index='Origin', columns='Destination', 
+                                values='Volume', fill_value=0, aggfunc='sum')
    
    # Create heatmap
    fig = px.imshow(matrix, 
                   labels=dict(x="Destination", y="Origin", color="Volume"),
-                  title="",
+                  title="Origin-Destination Volume Matrix",
                   color_continuous_scale='YlOrRd',
                   aspect='auto')
    fig.update_layout(height=600)
    st.plotly_chart(fig, use_container_width=True)
    
-   # All trade lanes sorted by volume
-   st.markdown('<p class="chart-title">All Trade Lanes by Volume</p>', unsafe_allow_html=True)
+   # Top lanes bar chart
+   st.markdown('<p class="chart-title">Top Trade Lanes</p>', unsafe_allow_html=True)
    
-   lanes_df = pd.DataFrame(all_lanes)
+   # Add lane description
    lanes_df['Lane'] = lanes_df['Origin'] + ' → ' + lanes_df['Destination']
    lanes_df['Type'] = lanes_df.apply(
     lambda x: 'Domestic' if x['Origin'] == x['Destination'] 
-    else 'Intercontinental' if x['Origin'] in ['CN', 'HK'] or x['Destination'] in ['US', 'AU', 'NZ']
-    else 'Intra-EU', axis=1
+    else 'Intercontinental' if x['Destination'] in ['US', 'AU', 'NZ'] or x['Origin'] in ['CN', 'HK']
+    else 'Regional', axis=1
    )
-   lanes_df = lanes_df.sort_values('Volume', ascending=False)
    
-   # Show top 20 lanes
-   top_lanes = lanes_df.head(20)
+   # Sort by volume and show top 20
+   top_lanes = lanes_df.sort_values('Volume', ascending=False).head(20)
    
    fig = px.bar(top_lanes, x='Lane', y='Volume',
               color='Type',
-              title='Top 20 Trade Lanes',
-              color_discrete_map={'Intra-EU': '#3182bd', 
+              title='Top 20 Trade Lanes by Volume',
+              color_discrete_map={'Regional': '#3182bd', 
                                 'Domestic': '#31a354',
                                 'Intercontinental': '#de2d26'})
    fig.update_layout(xaxis_tickangle=-45, height=400)
    st.plotly_chart(fig, use_container_width=True)
    
    # Network statistics
-   total_network_volume = sum(lane['Volume'] for lane in all_lanes)
-   active_lanes = len(all_lanes)
-   avg_per_lane = total_network_volume / active_lanes if active_lanes > 0 else 0
+   total_volume = lanes_df['Volume'].sum()
+   num_lanes = len(lanes_df)
+   avg_volume = total_volume / num_lanes if num_lanes > 0 else 0
    
    col1, col2, col3 = st.columns(3)
-   
    with col1:
-    st.metric("Total Network Volume", f"{total_network_volume:,}", "shipments")
-   
+    st.metric("Total Network Volume", f"{total_volume:,}")
    with col2:
-    st.metric("Active Trade Lanes", f"{active_lanes:,}", "routes")
-   
+    st.metric("Active Lanes", f"{num_lanes:,}")
    with col3:
-    st.metric("Average per Lane", f"{avg_per_lane:.1f}", "shipments")
+    st.metric("Avg Volume/Lane", f"{avg_volume:.1f}")
    
-   # Lane details table
-   st.markdown("**Detailed Lane Information (Top 30)**")
-   lane_table = lanes_df[['Origin', 'Destination', 'Volume', 'Type']].head(30)
-   st.dataframe(lane_table, hide_index=True, use_container_width=True)
+   # Detailed lane table
+   st.markdown("**Lane Details (Top 30)**")
+   lane_details = lanes_df[['Origin', 'Destination', 'Volume', 'Type']].sort_values(
+    'Volume', ascending=False).head(30)
+   st.dataframe(lane_details, hide_index=True, use_container_width=True)
   
-  # Network Insights
-  st.markdown('<div class="insight-box">', unsafe_allow_html=True)
-  st.markdown("### 🛣️ Network Structure Analysis")
-  st.markdown(f"""
-  **Network Overview:**
-  - **Total volume**: {total_network_volume:,} shipments
-  - **Active lanes**: {active_lanes} routes
-  - **Average volume per lane**: {avg_per_lane:.1f} shipments
-  
-  **Hub Analysis:**
-  - Primary hub locations based on high origin volumes
-  - Key destination markets identified
-  - Hub-and-spoke model efficiency confirmed
-  
-  **Trade Patterns:**
-  - Intra-EU dominance shows regional focus
-  - Domestic volumes indicate local distribution
-  - Intercontinental routes show global reach
-  
-  **Optimization Opportunities:**
-  - Low-volume lanes for consolidation
-  - High-volume corridors for dedicated service
-  - Imbalanced flows for backhaul optimization
-  """)
-  st.markdown('</div>', unsafe_allow_html=True)
+  else:
+   st.warning("No lane data available in the uploaded file.")
  
  # TAB 6: Executive Report
  with tab6:
@@ -986,7 +777,6 @@ if tms_data is not None:
   
   # Report Header
   st.markdown(f"**Report Date**: {datetime.now().strftime('%B %d, %Y')}")
-  st.markdown(f"**Reporting Period**: Based on uploaded TMS data")
   st.markdown("**Prepared for**: LFS Amsterdam Management Team")
   
   # Executive Summary
@@ -996,15 +786,15 @@ if tms_data is not None:
   performance_status = "Meeting Targets" if avg_otp >= 95 and profit_margin >= 20 else "Below Targets"
   
   st.markdown(f"""
-  LFS Amsterdam operates a **{performance_status}** logistics network processing **{total_services} shipments** 
-  across multiple countries. The operation shows {'strong' if performance_status == "Meeting Targets" else 'improving'} 
-  operational and financial performance.
+  LFS Amsterdam operates a **{performance_status}** logistics network with:
+  - **{total_services:,} shipments** processed
+  - **{len(tms_data.get('country_volumes', {}))} countries** served
+  - **{len(tms_data.get('service_volumes', {}))} service types** offered
   
-  **Key Performance Indicators:**
-  - **On-Time Performance**: {avg_otp:.1f}% (Target: 95%)
-  - **Profit Margin**: {profit_margin:.1f}% (Target: 20%)
-  - **Revenue per Shipment**: €{total_revenue/total_services:.2f}
-  - **Active Trade Lanes**: {tms_data.get('lanes_list', []).__len__()} routes
+  **Key Metrics:**
+  - OTP: {avg_otp:.1f}% (Target: 95%)
+  - Profit Margin: {profit_margin:.1f}% (Target: 20%)
+  - Revenue/Shipment: €{total_revenue/total_services:.2f if total_services > 0 else 0}
   """)
   st.markdown('</div>', unsafe_allow_html=True)
   
@@ -1014,43 +804,42 @@ if tms_data is not None:
   
   st.markdown(f"""
   **Operational Performance:**
-  - OTP at {avg_otp:.1f}% {'exceeds' if avg_otp >= 95 else 'below'} industry standard
-  - {total_orders:,} orders tracked with {int(avg_otp/100 * total_orders):,} delivered on time
-  - Main delay causes: Customer issues, system errors, delivery challenges
+  - On-time delivery rate: {avg_otp:.1f}%
+  - Total orders tracked: {total_orders:,}
+  - Service reliability: {'Above' if avg_otp >= 95 else 'Below'} industry standard
   
   **Financial Performance:**
   - Total revenue: €{total_revenue:,.0f}
-  - Total costs: €{total_cost:,.0f}
+  - Operating costs: €{total_cost:,.0f}
   - Net profit: €{total_revenue - total_cost:,.0f}
-  - Margin of {profit_margin:.1f}% {'above' if profit_margin >= 20 else 'below'} 20% target
   
   **Network Efficiency:**
-  - {total_services} shipments across {len(tms_data.get('country_volumes', {}))} countries
-  - {len(tms_data.get('service_volumes', {}))} service types in operation
-  - Hub-and-spoke model with primary concentration in key markets
+  - Active trade lanes: {len(tms_data.get('lanes_list', []))}
+  - Geographic coverage: {len(tms_data.get('country_volumes', {}))} countries
+  - Service diversity: {len(tms_data.get('service_volumes', {}))} types
   """)
   st.markdown('</div>', unsafe_allow_html=True)
   
-  # Strategic Recommendations
+  # Recommendations
   st.markdown('<div class="report-section">', unsafe_allow_html=True)
   st.markdown("## 3. Strategic Recommendations")
   
-  st.markdown("""
-  **Immediate Actions:**
-  1. Address OTP improvement through customer communication and system fixes
-  2. Review pricing in loss-making countries
-  3. Optimize high-cost operational areas
+  recommendations = []
   
-  **Short-term Initiatives:**
-  1. Expand in high-margin markets
-  2. Consolidate low-volume lanes
-  3. Implement operational efficiency programs
+  if avg_otp < 95:
+   recommendations.append("• Implement OTP improvement program targeting customer communication and system accuracy")
+  if profit_margin < 20:
+   recommendations.append("• Review pricing strategy and cost optimization opportunities")
+  if len(tms_data.get('lanes_list', [])) > 0:
+   recommendations.append("• Optimize low-volume lanes and strengthen high-volume corridors")
   
-  **Long-term Strategy:**
-  1. Develop secondary hubs for regional coverage
-  2. Invest in technology for better tracking and prediction
-  3. Build strategic partnerships in growth markets
-  """)
+  if recommendations:
+   st.markdown("**Priority Actions:**")
+   for rec in recommendations:
+    st.markdown(rec)
+  else:
+   st.markdown("**Continue current strategies while exploring growth opportunities**")
+  
   st.markdown('</div>', unsafe_allow_html=True)
   
   # Conclusion
@@ -1058,14 +847,14 @@ if tms_data is not None:
   st.markdown("## 4. Conclusion")
   
   st.markdown(f"""
-  LFS Amsterdam shows {'strong' if performance_status == "Meeting Targets" else 'solid'} operational foundation 
-  with clear opportunities for growth and optimization. Focus areas include:
+  LFS Amsterdam demonstrates {'strong' if performance_status == "Meeting Targets" else 'developing'} 
+  operational capabilities with clear paths for optimization:
   
-  - {'Maintaining' if avg_otp >= 95 else 'Improving'} on-time performance
-  - {'Protecting' if profit_margin >= 20 else 'Enhancing'} profit margins
-  - Optimizing network efficiency
-  - Expanding in profitable markets
+  - {'Maintain' if avg_otp >= 95 else 'Improve'} service reliability
+  - {'Protect' if profit_margin >= 20 else 'Enhance'} profit margins
+  - Optimize network efficiency
+  - Expand strategic markets
   
-  Regular monitoring and targeted improvements will drive continued success.
+  Regular monitoring and targeted improvements will ensure continued success.
   """)
   st.markdown('</div>', unsafe_allow_html=True)
