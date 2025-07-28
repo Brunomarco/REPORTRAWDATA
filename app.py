@@ -641,8 +641,8 @@ if tms_data is not None:
             if lanes_data and total_lane_volume > 0:
                 top_10_volume = sum(lane['Volume'] for lane in sorted(lanes_data, key=lambda x: x['Volume'], reverse=True)[:10])
                 st.markdown(f"• **Lane Concentration**: Top 10 lanes handle {top_10_volume/total_lane_volume*100:.1f}% of volume")
-            
-            # Network balance
+                
+                # Network balance
                 domestic_volume = sum(lane['Volume'] for lane in lanes_data if lane['Origin'] == lane['Destination'])
                 international_volume = total_lane_volume - domestic_volume
                 st.markdown(f"• **Network Split**: {international_volume/total_lane_volume*100:.1f}% international, {domestic_volume/total_lane_volume*100:.1f}% domestic")
