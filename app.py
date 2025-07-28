@@ -471,7 +471,7 @@ if tms_data is not None:
             st.metric("💰 Revenue", f"€{total_revenue:,.0f}", "total")
         
         with col4:
-            margin_delta = f"{profit_margin-20:.1f}%" if profit_margin != 0 else "N/A"
+            margin_delta = f"{profit_margin-20:.1f}%" if total_revenue > 0 else "N/A"
             st.metric("📈 Margin", f"{profit_margin:.1f}%", margin_delta)
         
         # Performance Summary
@@ -482,11 +482,11 @@ if tms_data is not None:
             st.markdown("### 📊 Performance Metrics")
             
             # Volume breakdown
-            if 'service_volumes' in tms_data:
+            if 'service_volumes' in tms_data and total_services > 0:
                 st.markdown("**Service Distribution:**")
                 for service, volume in sorted(tms_data['service_volumes'].items(), key=lambda x: x[1], reverse=True):
                     if volume > 0:
-                        percentage = (volume/total_services*100) if total_services > 0 else 0
+                        percentage = (volume/total_services*100)
                         st.write(f"- {service}: {volume} ({percentage:.1f}%)")
             
             st.markdown('</div>', unsafe_allow_html=True)
@@ -633,18 +633,19 @@ if tms_data is not None:
             st.markdown("### 🛣️ Lane Network Analysis")
             
             # Hub analysis
-            if origin_volumes:
+            if origin_volumes and total_lane_volume > 0:
                 top_origin = max(origin_volumes, key=origin_volumes.get)
                 st.markdown(f"• **Primary Hub**: {top_origin} with {origin_volumes[top_origin]} outbound shipments ({origin_volumes[top_origin]/total_lane_volume*100:.1f}% of network)")
             
             # Lane concentration
-            top_10_volume = sum(lane['Volume'] for lane in sorted(lanes_data, key=lambda x: x['Volume'], reverse=True)[:10])
-            st.markdown(f"• **Lane Concentration**: Top 10 lanes handle {top_10_volume/total_lane_volume*100:.1f}% of volume")
+            if lanes_data and total_lane_volume > 0:
+                top_10_volume = sum(lane['Volume'] for lane in sorted(lanes_data, key=lambda x: x['Volume'], reverse=True)[:10])
+                st.markdown(f"• **Lane Concentration**: Top 10 lanes handle {top_10_volume/total_lane_volume*100:.1f}% of volume")
             
             # Network balance
-            domestic_volume = sum(lane['Volume'] for lane in lanes_data if lane['Origin'] == lane['Destination'])
-            international_volume = total_lane_volume - domestic_volume
-            st.markdown(f"• **Network Split**: {international_volume/total_lane_volume*100:.1f}% international, {domestic_volume/total_lane_volume*100:.1f}% domestic")
+                domestic_volume = sum(lane['Volume'] for lane in lanes_data if lane['Origin'] == lane['Destination'])
+                international_volume = total_lane_volume - domestic_volume
+                st.markdown(f"• **Network Split**: {international_volume/total_lane_volume*100:.1f}% international, {domestic_volume/total_lane_volume*100:.1f}% domestic")
             
             st.markdown('</div>', unsafe_allow_html=True)
     
@@ -1264,8 +1265,8 @@ st.markdown("*Dashboard developed for LFS Amsterdam TMS Performance Analysis*")
                     profitable_orders = len(margin_data[margin_data > 0])
                     high_margin_orders = len(margin_data[margin_data >= 20])
                     
-                    st.write(f"Profitable Orders: {profitable_orders} ({profitable_orders/len(margin_data)*100:.1f}%)")
-                    st.write(f"High Margin (≥20%): {high_margin_orders} ({high_margin_orders/len(margin_data)*100:.1f}%)")
+                    st.write(f"Profitable Orders: {profitable_orders} ({profitable_orders/len(margin_data)*100:.1f}%)" if len(margin_data) > 0 else "Profitable Orders: N/A")
+                    st.write(f"High Margin (≥20%): {high_margin_orders} ({high_margin_orders/len(margin_data)*100:.1f}%)" if len(margin_data) > 0 else "High Margin (≥20%): N/A")
             
             # Country/Office Performance Analysis
             if len(billed_df) > 0:
@@ -1319,7 +1320,11 @@ st.markdown("*Dashboard developed for LFS Amsterdam TMS Performance Analysis*")
                         'Diff': 'sum'
                     }).round(2)
                     
-                    office_performance['Margin %'] = (office_performance['Diff'] / office_performance['Net_Revenue'] * 100).round(2)
+                    # Calculate margin with zero division check
+                    office_performance['Margin %'] = office_performance.apply(
+                        lambda row: (row['Diff'] / row['Net_Revenue'] * 100).round(2) if row['Net_Revenue'] != 0 else 0,
+                        axis=1
+                    )
                     office_performance = office_performance.sort_values('Net_Revenue', ascending=False)
                     
                     # Create table
@@ -1351,7 +1356,7 @@ st.markdown("*Dashboard developed for LFS Amsterdam TMS Performance Analysis*")
             
             # Revenue per order
             num_orders = len(billed_df)
-            if num_orders > 0:
+            if num_orders > 0 and total_revenue > 0:
                 rev_per_order = total_revenue / num_orders
                 insights.append(f"• Average revenue per order: €{rev_per_order:.2f}")
             
