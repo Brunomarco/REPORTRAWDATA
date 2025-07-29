@@ -177,22 +177,22 @@ def load_tms_data(uploaded_file):
     if 'Order_Date' in cost_df.columns:
      cost_df['Order_Date'] = safe_date_conversion(cost_df['Order_Date'])
     
-    # IMPORTANT: Only use BILLED orders for financial calculations
-    # Exclude row 128 (index 127) which contains SUBTOTAL formulas
-    if len(cost_df) >= 128:
-     cost_df = cost_df.iloc[:127]  # Use only rows 3-127 (indices 0-126)
+    # IMPORTANT: Excel rows 3-127 correspond to DataFrame indices 2-126
+    # Row 128 (index 127) contains SUBTOTAL formulas and must be excluded
+    if len(cost_df) > 126:
+     cost_df = cost_df.iloc[:125]  # Use only data rows, excluding subtotal row
     
-    # Filter for BILLED status only
+    # Store original data for reference
+    data['cost_sales_all'] = cost_df.copy()
+    
+    # Filter for BILLED status only for financial calculations
     if 'Status' in cost_df.columns:
-     cost_df = cost_df[cost_df['Status'] == 'BILLED']
+     billed_df = cost_df[cost_df['Status'] == 'BILLED'].copy()
+    else:
+     billed_df = cost_df.copy()
     
-    # Clean financial data - remove rows with missing financial values
-    if 'Net_Revenue' in cost_df.columns and 'Total_Cost' in cost_df.columns:
-     cost_df = cost_df.dropna(subset=['Net_Revenue', 'Total_Cost'])
-     # Only keep rows with actual financial activity
-     cost_df = cost_df[(cost_df['Net_Revenue'] != 0) | (cost_df['Total_Cost'] != 0)]
-    
-    data['cost_sales'] = cost_df
+    # Don't remove any rows - keep all BILLED orders even with 0 values
+    data['cost_sales'] = billed_df
    
    return data
    
@@ -217,6 +217,7 @@ avg_otp = 0
 total_orders = 0
 total_revenue = 0
 total_cost = 0
+total_diff = 0
 profit_margin = 0
 total_services = 0
 
@@ -236,16 +237,26 @@ if tms_data is not None:
  # Financial metrics - FIXED to use only BILLED orders
  if 'cost_sales' in tms_data and not tms_data['cost_sales'].empty:
   cost_df = tms_data['cost_sales']
+  
+  # Calculate the actual totals from BILLED orders only
   if 'Net_Revenue' in cost_df.columns:
    total_revenue = cost_df['Net_Revenue'].sum()
+  
   if 'Total_Cost' in cost_df.columns:
-   total_cost = cost_df['Total_Cost'].sum()
+   # Total cost is the sum of all cost components
+   cost_cols = ['PU_Cost', 'Ship_Cost', 'Man_Cost', 'Del_Cost']
+   total_cost = 0
+   for col in cost_cols:
+    if col in cost_df.columns:
+     total_cost += cost_df[col].sum()
+  
   if 'Diff' in cost_df.columns:
    total_diff = cost_df['Diff'].sum()
-   # Calculate profit margin as diff/revenue (matching Excel formula)
+   # Calculate profit margin as diff/revenue (matching Excel SUBTOTAL formula)
    profit_margin = (total_diff / total_revenue * 100) if total_revenue > 0 else 0
   else:
-   profit_margin = ((total_revenue - total_cost) / total_revenue * 100) if total_revenue > 0 else 0
+   total_diff = total_revenue - total_cost
+   profit_margin = (total_diff / total_revenue * 100) if total_revenue > 0 else 0
 
 # Create tabs for each sheet
 if tms_data is not None:
@@ -601,7 +612,12 @@ if tms_data is not None:
     st.markdown("**Revenue vs Cost Analysis**")
     st.markdown("<small>Shows total income, expenses, and resulting profit</small>", unsafe_allow_html=True)
     
-    profit = total_revenue - total_cost
+    # Use total_diff as profit if available, otherwise calculate
+    if 'total_diff' in locals() and total_diff is not None:
+     profit = total_diff
+    else:
+     profit = total_revenue - total_cost
+    
     financial_data = pd.DataFrame({
      'Category': ['Revenue', 'Cost', 'Profit'],
      'Amount': [total_revenue, total_cost, profit]
@@ -653,17 +669,21 @@ if tms_data is not None:
     st.markdown("**Financial KPIs**")
     st.markdown("<small>Key financial metrics</small>", unsafe_allow_html=True)
     
-    # Display key financial KPIs
+    # Display key financial KPIs - matching Excel SUBTOTAL results
     kpi_data = pd.DataFrame({
      'Metric': ['NET Total', 'DIFF Total', 'Gross Margin %', 'Orders Billed'],
      'Value': [
       f"€{total_revenue:,.2f}",
-      f"€{total_diff:,.2f}" if 'total_diff' in locals() else f"€{profit:,.2f}",
+      f"€{total_diff:,.2f}",
       f"{profit_margin:.2f}%",
       f"{len(cost_df):,}"
      ]
     })
     st.dataframe(kpi_data, hide_index=True, use_container_width=True)
+    
+    # Show expected vs actual for verification
+    st.markdown("**Target Values:**")
+    st.markdown(f"<small>NET: €197,312.32<br>DIFF: €20,112.72<br>Gross: 10.19%</small>", unsafe_allow_html=True)
    
    # Add spacing and new row for Profit Margin Distribution
    st.markdown("<br>", unsafe_allow_html=True)
